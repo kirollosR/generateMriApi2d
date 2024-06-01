@@ -1,340 +1,225 @@
+import os
+# Set environment variable
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppresses INFO and WARNING logs
+
 import tensorflow as tf
-from tensorflow import keras
-
-from tensorflow.keras.layers import Input, Conv3D, Activation, Add, LeakyReLU,Conv3DTranspose
-from keras.models import Model
-import keras
-
-input_shape=(176, 176, 124, 1)
-learning_rate = 0.0002
-epochs = 2
-batch_size = 1
-gan_filters = 16
-dis_filters = 32
-downsampling =2
-upsampling = 2
-residual_blocks = 4
-disc_downsampling_blocks=2
+import tensorflow.keras.layers as L
+from tensorflow.keras.models import Model
+import glob
+import matplotlib.pyplot as plt
+import numpy as np
 
 
-def get_resnet_generator_3d(input_shape=input_shape, filters=gan_filters, num_downsampling_blocks=downsampling,
-                            num_residual_blocks=residual_blocks, num_upsample_blocks=upsampling, name=None):
-    inputs = Input(shape=input_shape)
+class InstanceNormalization(tf.keras.layers.Layer):
+    def __init__(self, epsilon=1e-5, **kwargs):
+        super(InstanceNormalization, self).__init__(**kwargs)
+        self.epsilon = epsilon
 
-    # Initial Convolution
-    x = Conv3D(filters, kernel_size=(1, 1, 1), strides=(1, 1, 1), padding='same', use_bias=True)(inputs)
-    x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-    x = Activation('relu')(x)
-
-    # Downsampling
-    for num_downsampl_blocks in range(num_downsampling_blocks):
-        filters *= 2
-        x = Conv3D(filters, kernel_size=(3, 3, 3), strides=(2, 2, 2), padding='same', use_bias=True)(x)
-        x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-        x = Activation('relu')(x)
-        # print int(x.shape[-1])
-    # Residual blocks
-    for num_residual_block in range(num_residual_blocks):
-        x_residual = x
-        x = Conv3D(filters=int(x.shape[-1]), kernel_size=(3, 3, 3), strides=(1, 1, 1), padding='same', use_bias=True)(x)
-        x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-        x = Activation('relu')(x)
-
-        x = Conv3D(filters=int(x.shape[-1]), kernel_size=(3, 3, 3), strides=(1, 1, 1), padding='same', use_bias=True)(x)
-        x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-        x = Add()([x_residual, x])
-        x = Activation('relu')(x)
-
-    # Upsampling
-    for num_upsample_block in range(num_upsample_blocks):
-        filters //= 2
-        # x = UpSampling3D(size=(2, 2, 2))(x)
-        x = Conv3DTranspose(filters, kernel_size=(3, 3, 3), strides=(2, 2, 2), padding='same', use_bias=True)(x)
-        x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-        x = Activation('relu')(x)
-
-    # Final Convolution
-    x = Conv3D(1, kernel_size=(7, 7, 7), strides=(1, 1, 1), padding='same')(x)
-    x = Activation('tanh')(x)
-
-    model = Model(inputs=inputs, outputs=x)
-    return model
-
-
-def get_discriminator_3d(input_shape=input_shape, filters=dis_filters, num_downsampling_blocks=disc_downsampling_blocks,
-                         name=None):
-    img_input = Input(shape=input_shape)
-
-    # Initial Convolution
-    x = Conv3D(filters, kernel_size=(4, 4, 4), strides=(2, 2, 2), padding="same", use_bias=True)(img_input)
-    x = LeakyReLU(0.2)(x)
-
-    num_filters = filters
-    for num_downsample_block in range(num_downsampling_blocks):
-        num_filters *= 2
-        x = Conv3D(num_filters, (4, 4, 4),
-                   strides=(2, 2, 2) if num_downsample_block < num_downsampling_blocks - 1 else (1, 1, 1),
-                   padding="same", use_bias=False)(x)
-        x = tf.keras.layers.GroupNormalization(groups=-1)(x, training=True)
-        x = LeakyReLU(0.2)(x)
-
-    x = Conv3D(1, kernel_size=(4, 4, 4), strides=(1, 1, 1), padding="same", use_bias=True)(x)
-    x = Activation('sigmoid')(x)
-
-    model = Model(inputs=img_input, outputs=x)
-    return model
-
-gen_A2B = get_resnet_generator_3d(name="generator_A")
-gen_B2A = get_resnet_generator_3d(name="generator_B")
-
-disc_A = get_discriminator_3d(name="discriminator_A")
-disc_B = get_discriminator_3d(name="discriminator_B")
-
-
-@keras.utils.register_keras_serializable()
-class CycleGan(keras.Model):
-    def __init__(
-            self,
-            generator_A,
-            generator_B,
-            discriminator_A,
-            discriminator_B,
-            lambda_cycle=10.0,
-            lambda_identity=0.5,
-    ):
-        super().__init__()
-        self.gen_A2B = generator_A
-        self.gen_B2A = generator_B
-        self.disc_A = discriminator_A
-        self.disc_B = discriminator_B
-        self.lambda_cycle = lambda_cycle
-        self.lambda_identity = lambda_identity
-
-        self.g_A_loss_tracker = keras.metrics.Mean(name="gen_A2B_loss")
-        self.g_B_loss_tracker = keras.metrics.Mean(name="gen_B2A_loss")
-
-        self.cycle_gen_A2B_tracker = keras.metrics.Mean(name="cycle_loss_A")
-        self.cycle_gen_B2A_tracker = keras.metrics.Mean(name="cycle_loss_B")
-
-        self.id_loss_A_tracker = keras.metrics.Mean(name="id_loss_A")
-        self.id_loss_B_tracker = keras.metrics.Mean(name="id_loss_B")
-
-        self.disc_A_loss_tracker = keras.metrics.Mean(name="disc_A_loss")
-        self.disc_B_loss_tracker = keras.metrics.Mean(name="disc_B_loss")
-
-        self.ssim_A_tracker = keras.metrics.Mean(name="ssim_A_score")
-        self.ssim_B_tracker = keras.metrics.Mean(name="ssim_B_score")
+    def build(self, input_shape):
+        # Create trainable parameters gamma and beta
+        self.gamma = self.add_weight(shape=(input_shape[-1],),
+                                     initializer='ones',
+                                     trainable=True,
+                                     name='gamma')
+        self.beta = self.add_weight(shape=(input_shape[-1],),
+                                    initializer='zeros',
+                                    trainable=True,
+                                    name='beta')
+        super(InstanceNormalization, self).build(input_shape)
 
     def call(self, inputs):
-        return (
-            self.disc_A(inputs),
-            self.disc_B(inputs),
-            self.gen_A2B(inputs),
-            self.gen_B2A(inputs),
-        )
+        # Compute the mean and variance along the spatial dimensions
+        mean, variance = tf.nn.moments(inputs, axes=[1, 2], keepdims=True)
+        normalized = (inputs - mean) / tf.sqrt(variance + self.epsilon)
+        return self.gamma * normalized + self.beta
 
-    def compile(
-            self,
-            gen_A2B_optimizer,
-            gen_B2A_optimizer,
-            disc_A_optimizer,
-            disc_B_optimizer,
-            gen_loss_fn,
-            disc_loss_fn,
-    ):
-        super().compile()
-        self.gen_A2B_optimizer = gen_A2B_optimizer
-        self.gen_B2A_optimizer = gen_B2A_optimizer
-        self.disc_A_optimizer = disc_A_optimizer
-        self.disc_B_optimizer = disc_B_optimizer
-        self.generator_loss_fn = gen_loss_fn
-        self.discriminator_loss_fn = disc_loss_fn
-        self.cycle_loss_Bn = keras.losses.MeanAbsoluteError()
-        self.identity_loss_fn = keras.losses.MeanAbsoluteError()
-
-    @tf.function
-    def train_step(self, batch_data):
-        # x is T1 and y is T2
-        real_A, real_B = batch_data
-
-        # For CycleGAN, we need to calculate different
-        # kinds of losses for the generators and discriminators.
-        # We will perform the following steps here:
-        #
-        # 1. Pass real images through the generators and get the generated images
-        # 2. Pass the generated images back to the generators to check if we
-        #    can predict the original image from the generated image.
-        # 3. Do an identity mapping of the real images using the generators.
-        # 4. Pass the generated images in 1) to the corresponding discriminators.
-        # 5. Calculate the generators total loss (adversarial + cycle + identity)
-        # 6. Calculate the discriminators loss
-        # 7. Update the weights of the generators
-        # 8. Update the weights of the discriminators
-        # 9. Return the losses in a dictionary
-
-        with tf.GradientTape(persistent=True) as tape:
-            # T1 to fake T2
-            fake_B = self.gen_A2B(real_A, training=True)
-            # T2 to fake T1 -> y2x
-            fake_A = self.gen_B2A(real_B, training=True)
-
-            # Cycle (T1 to fake T2 to fake T1): x -> y -> x
-            cycled_A = self.gen_B2A(fake_B, training=True)
-            # Cycle (T2 to fake T1 to fake T2) y -> x -> y
-            cycled_B = self.gen_A2B(fake_A, training=True)
-
-            # Identity mapping
-            same_A = self.gen_B2A(real_A, training=True)
-            same_B = self.gen_A2B(real_B, training=True)
-
-            # Discriminator output
-            disc_real_A = self.disc_A(real_A, training=True)
-            disc_fake_A = self.disc_A(fake_A, training=True)
-
-            disc_real_B = self.disc_B(real_B, training=True)
-            disc_fake_B = self.disc_B(fake_B, training=True)
-
-            # Generator adversarial loss
-            gen_A2B_loss = self.generator_loss_fn(disc_fake_B)
-            gen_B2A_loss = self.generator_loss_fn(disc_fake_A)
-
-            # Generator cycle loss
-            cycle_loss_A = self.cycle_loss_Bn(real_B, cycled_B) * self.lambda_cycle
-            cycle_loss_B = self.cycle_loss_Bn(real_A, cycled_A) * self.lambda_cycle
-
-            # Generator identity loss
-            id_loss_A = (
-                    self.identity_loss_fn(real_B, same_B)
-                    * self.lambda_cycle
-                    * self.lambda_identity
-            )
-            id_loss_B = (
-                    self.identity_loss_fn(real_A, same_A)
-                    * self.lambda_cycle
-                    * self.lambda_identity
-            )
-
-            # Calculate model Structural Similarity Index Measure(SSIM)
-            def calculate_ssim(real_images, generated_images):
-                real_images = tf.cast(real_images, tf.float32)
-                generated_images = tf.cast(generated_images, tf.float32)
-                ssim_score = 0.5 * (
-                tf.image.ssim(generated_images, real_images, max_val=2.0)[0]) + 0.5 * tf.reduce_mean(
-                    tf.abs(generated_images - real_images))
-                return ssim_score
-
-            # Total generator loss
-            total_loss_A2B = gen_A2B_loss + cycle_loss_A + id_loss_A
-            # print("total_loss_A2B: ", total_loss_A2B)
-            total_loss_B2A = gen_B2A_loss + cycle_loss_B + id_loss_B
-
-            # Discriminator loss
-            disc_A_loss = self.discriminator_loss_fn(disc_real_A, disc_fake_A)
-            disc_B_loss = self.discriminator_loss_fn(disc_real_B, disc_fake_B)
-
-            ssim_A_score = calculate_ssim(real_A, cycled_A)
-            ssim_B_score = calculate_ssim(real_B, cycled_B)
-
-        # Get the gradients for the generators
-        grads_A2B = tape.gradient(total_loss_A2B, self.gen_A2B.trainable_variables)
-        grads_B2A = tape.gradient(total_loss_B2A, self.gen_B2A.trainable_variables)
-
-        # Get the gradients for the discriminators
-        disc_A_grads = tape.gradient(disc_A_loss, self.disc_A.trainable_variables)
-        disc_B_grads = tape.gradient(disc_B_loss, self.disc_B.trainable_variables)
-
-        # Update the weights of the generators
-        self.gen_A2B_optimizer.apply_gradients(
-            zip(grads_A2B, self.gen_A2B.trainable_variables)
-        )
-        self.gen_B2A_optimizer.apply_gradients(
-            zip(grads_B2A, self.gen_B2A.trainable_variables)
-        )
-
-        # Update the weights of the discriminators
-        self.disc_A_optimizer.apply_gradients(
-            zip(disc_A_grads, self.disc_A.trainable_variables)
-        )
-        self.disc_B_optimizer.apply_gradients(
-            zip(disc_B_grads, self.disc_B.trainable_variables)
-        )
-
-        self.g_A_loss_tracker.update_state(gen_A2B_loss)
-        self.g_B_loss_tracker.update_state(gen_B2A_loss)
-
-        self.cycle_gen_A2B_tracker.update_state(cycle_loss_A)
-        self.cycle_gen_B2A_tracker.update_state(cycle_loss_B)
-
-        self.id_loss_A_tracker.update_state(id_loss_A)
-        self.id_loss_B_tracker.update_state(id_loss_B)
-
-        self.disc_A_loss_tracker.update_state(disc_A_loss)
-        self.disc_B_loss_tracker.update_state(disc_B_loss)
-
-        self.ssim_A_tracker.update_state(ssim_A_score)
-        self.ssim_B_tracker.update_state(ssim_B_score)
-
-        losses = {
-            "gen_A2B_loss": self.g_A_loss_tracker.result(),
-            "gen_B2A_loss": self.g_B_loss_tracker.result(),
-
-            "cycle_loss_A": self.cycle_gen_A2B_tracker.result(),
-            "cycle_loss_B": self.cycle_gen_B2A_tracker.result(),
-
-            "id_loss_A": self.id_loss_A_tracker.result(),
-            "id_loss_B": self.id_loss_B_tracker.result(),
-
-            "disc_A_loss": self.disc_A_loss_tracker.result(),
-            "disc_B_loss": self.disc_B_loss_tracker.result(),
-
-            "ssim_score_A": self.ssim_A_tracker.result(),
-            "ssim_score_B": self.ssim_B_tracker.result(),
-        }
-
-        return losses
-
-    def get_config(self):
-        config = {
-            "generator_A": keras.utils.serialize_keras_object(self.gen_A2B),
-            "generator_B": keras.utils.serialize_keras_object(self.gen_B2A),
-            "discriminator_A": keras.utils.serialize_keras_object(self.disc_A),
-            "discriminator_B": keras.utils.serialize_keras_object(self.disc_B),
-            "lambda_cycle": self.lambda_cycle,
-            "lambda_identity": self.lambda_identity,
-        }
-        base_config = super().get_config()
-        return dict(list(base_config.items()) + list(config.items()))
-
-    @classmethod
-    def from_config(cls, config):
-        name = config.pop('name', None)
-        trainable = config.pop('trainable', True)  # Handle the 'trainable' attribute
-        dtype = config.pop('dtype', 'float32')  # Handle the 'dtype' attribute
-        generator_G = keras.layers.deserialize(config.pop("generator_G"))
-        generator_F = keras.layers.deserialize(config.pop("generator_F"))
-        discriminator_A = keras.layers.deserialize(config.pop("discriminator_A"))
-        discriminator_B = keras.layers.deserialize(config.pop("discriminator_B"))
-        return cls(generator_G=generator_G, generator_F=generator_F, discriminator_A=discriminator_A,
-                   discriminator_B=discriminator_B, **config)
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
 
-adv_loss_fn = keras.losses.MeanSquaredError()
-dis_bce_loss = keras.losses.MeanSquaredError()
+def conv_block(x, num_filters):
+    x = L.Conv2D(num_filters, 3, padding="same")(x)
+    x = InstanceNormalization()(x)
+    x = L.Activation("relu")(x)
 
-# Define the loss function for the generators
-def generator_loss_fn(fake):
-    fake_loss = adv_loss_fn(tf.ones_like(fake), fake)
-    return fake_loss
+    x = L.Conv2D(num_filters, 3, padding="same")(x)
+    x = InstanceNormalization()(x)
+    x = L.Activation("relu")(x)
 
-# Define the loss function for the discriminators
-def discriminator_loss_fn(real, fake):
-    real_loss = dis_bce_loss(tf.ones_like(real), real)
-    fake_loss = dis_bce_loss(tf.zeros_like(fake), fake)
-    return (real_loss + fake_loss) * 0.5
+    return x
 
 
-# Create cycle gan model
-cycle_gan_model = CycleGan(
-    generator_A=gen_A2B, generator_B=gen_B2A, discriminator_A=disc_A, discriminator_B=disc_B
-)
+def se_block(x, num_filters, ratio=8):
+    se_shape = (1, 1, num_filters)
+    se = L.GlobalAveragePooling2D()(x)
+    se = L.Reshape(se_shape)(se)
+    se = L.Dense(num_filters // ratio, activation="relu", use_bias=False)(se)
+    se = L.Dense(num_filters, activation="sigmoid", use_bias=False)(se)
+    se = L.Reshape(se_shape)(se)
+    x = L.Multiply()([x, se])
+    return x
 
+
+def encoder_block(x, num_filters):
+    x = conv_block(x, num_filters)
+    x = se_block(x, num_filters)
+    p = L.MaxPool2D((2, 2))(x)
+    return x, p
+
+
+def decoder_block(x, s, num_filters):
+    x = L.UpSampling2D(interpolation="bilinear")(x)
+    x = L.Concatenate()([x, s])
+    x = conv_block(x, num_filters)
+    x = se_block(x, num_filters)
+    return x
+
+
+def squeeze_attention_unet(input_shape=(256, 256, 3)):
+    """ Inputs """
+    inputs = L.Input(input_shape)
+
+    """ Encoder """
+    s1, p1 = encoder_block(inputs, 64)
+    s2, p2 = encoder_block(p1, 128)
+    s3, p3 = encoder_block(p2, 256)
+    s4, p4 = encoder_block(p3, 512)
+
+    b1 = conv_block(p4, 1024)
+    b1 = se_block(b1, 1024)
+
+    """ Decoder """
+    d = decoder_block(b1, s4, 512)
+    d1 = decoder_block(d, s3, 256)
+    d2 = decoder_block(d1, s2, 128)
+    d3 = decoder_block(d2, s1, 64)
+
+    """ Outputs """
+    outputs = L.Conv2D(3, (1, 1), activation='tanh')(d3)
+
+    """ Model """
+
+    model = Model(inputs, outputs, name="Squeeze-Attention-UNET")
+    return model
+
+
+generator_g = squeeze_attention_unet()
+
+
+def downsample(filters, size, apply_norm=True):
+    initializer = tf.random_normal_initializer(0., 0.02)
+    result = tf.keras.Sequential()
+    result.add(tf.keras.layers.Conv2D(filters, size, strides=2, padding='same',
+                                      kernel_initializer=initializer, use_bias=False))
+
+    if apply_norm:
+        result.add(InstanceNormalization())
+    result.add(tf.keras.layers.LeakyReLU())
+    return result
+
+
+def discriminator():
+    initializer = tf.random_normal_initializer(0., 0.02)
+    inp = tf.keras.layers.Input(shape=[256, 256, 3], name='input_image')
+    x = inp
+    down1 = downsample(64, 4, False)(x)  # (bs, 16, 16, 64)
+    down2 = downsample(128, 4)(down1)
+    down3 = downsample(256, 4)(down2)
+
+    zero_pad1 = tf.keras.layers.ZeroPadding2D()(down3)  # (bs, 34, 34, 256)
+    conv = tf.keras.layers.Conv2D(512, 4, strides=1, kernel_initializer=initializer,
+                                  use_bias=False)(zero_pad1)  # (bs, 31, 31, 512)
+    norm1 = InstanceNormalization()(conv)
+    leaky_relu = tf.keras.layers.LeakyReLU()(norm1)
+    zero_pad2 = tf.keras.layers.ZeroPadding2D()(leaky_relu)  # (bs, 33, 33, 512)
+
+    last = tf.keras.layers.Conv2D(3, 4, strides=1, kernel_initializer=initializer)(zero_pad2)  # (bs, 30, 30, 1)
+    return tf.keras.Model(inputs=inp, outputs=last)
+
+discriminator_x = discriminator()
+
+generator_g_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5 ) # , beta_1=0.5
+discriminator_x_optimizer = tf.keras.optimizers.Adam(2e-4, beta_1=0.5 ) # , beta_1=0.5
+
+def load_model(ckpt_path):
+    checkpoint = tf.train.Checkpoint(generator_g=generator_g,
+                                     discriminator_x=discriminator_x,
+                                     generator_g_optimizer=generator_g_optimizer,
+                                     discriminator_x_optimizer=discriminator_x_optimizer)
+    # Set up the checkpoint manager
+    manager = tf.train.CheckpointManager(checkpoint, f"{ckpt_path}", max_to_keep=5)
+
+    ckpt_restore_path = manager.latest_checkpoint
+    if ckpt_restore_path:
+        checkpoint.restore(ckpt_restore_path)
+        print(f"Restored from {ckpt_restore_path}")
+    else:
+        print("Initializing from scratch.")
+
+
+
+def clear_folder(folder_path):
+    # List all files in the folder
+    files = glob.glob(os.path.join(folder_path, "*.png"))
+    # Delete each file
+    for f in files:
+        os.remove(f)
+
+
+def generate_single_images_GIF(img_input, model, order, generated_results_path):
+    # Clear the folder before saving new images
+
+    # Generate model prediction
+    prediction = model(img_input)
+    # Extract the specific slice and rotate
+    pred_vol = prediction[0, :, :, 0].numpy().copy()
+
+    # Create a figure for displaying the image
+    plt.figure(figsize=(10, 6))
+    display_list = [pred_vol]
+    for i in range(1):
+        plt.subplot(1, 1, i + 1)
+        plt.imshow(display_list[i], cmap='gray')
+        plt.axis('off')
+
+        # Format the save path to ensure filename is in the desired format
+        slice_number = order + i + 6  # Calculate slice number based on order and offset
+        save_path = f"{generated_results_path}\\slice_{slice_number:03d}.png"
+        plt.savefig(save_path, bbox_inches='tight', pad_inches=0, transparent=True)
+        plt.close()
+
+    return pred_vol
+
+def normalize(image):
+    image = (image/127.5)-1
+    return image
+
+
+def Generate(crop_black_boundary_path, Generated_results_path):
+    Gen_A = tf.keras.preprocessing.image_dataset_from_directory(
+        crop_black_boundary_path,
+        seed=123,
+        labels=None,
+        image_size=(256, 256),
+        batch_size=1,
+        shuffle=False)
+
+    Gen_B = tf.keras.preprocessing.image_dataset_from_directory(
+        crop_black_boundary_path,
+        seed=123,
+        labels=None,
+        image_size=(256, 256),
+        batch_size=1,
+        shuffle=False)
+
+    Gen_A = Gen_A.map(lambda x: (normalize(x)))
+    Gen_B = Gen_B.map(lambda x: (normalize(x)))
+
+    order_2 = 0
+    clear_folder(Generated_results_path)
+    for image_x, image_y in tf.data.Dataset.zip((Gen_A, Gen_B)):
+        generate_single_images_GIF(image_x, generator_g, order_2, Generated_results_path)
+        order_2 = order_2 + 1
+
+    print("Phase 3 'generate' Done")

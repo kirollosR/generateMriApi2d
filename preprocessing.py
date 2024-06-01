@@ -3,6 +3,106 @@ import numpy as np
 import glob
 import nibabel as nib
 import datetime
+import matplotlib.pyplot as plt
+import cv2
+import tensorflow as tf
+
+def nii_to_png(input_file, output_dir):
+    # Load the NIfTI file
+    img = nib.load(input_file)
+    data = img.get_fdata()
+
+    # Ensure the output directory exists
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    else:
+        # Delete existing PNG files in the output directory
+        existing_png_files = [f for f in os.listdir(output_dir) if f.endswith('.png')]
+        for png_file in existing_png_files:
+            os.remove(os.path.join(output_dir, png_file))
+        #print(f"Deleted {len(existing_png_files)} existing PNG files in {output_dir}")
+
+    # Iterate over the slices in the 3rd dimension
+    for i in range(data.shape[2]):
+        slice_data = data[:, :, i]
+
+        # Normalize the slice data to 0-255
+        slice_data = (slice_data - np.min(slice_data)) / (np.max(slice_data) - np.min(slice_data)) * 255
+        slice_data = slice_data.astype(np.uint8)
+
+        output_path = os.path.join(output_dir, f'slice_{i:03d}.png')
+        plt.imsave(output_path, slice_data, cmap='gray')
+
+    print("Phase 1 'nii to png' Done")
+
+
+def crop_black_space(image):
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # Find all non-black pixels
+    coords = cv2.findNonZero(gray)
+
+    # Check if there are any non-black pixels found
+    if coords is None:
+        # If no non-black pixels are found, the image is considered completely black
+        # print("Image is completely black.")
+        return None
+
+    # Create a bounding box around the non-black pixels
+    x, y, w, h = cv2.boundingRect(coords)
+
+    # Check if the bounding box has a valid size
+    if w == 0 or h == 0:
+        # print("Invalid bounding box size, returning original image")
+        return image
+
+    # Crop the image to the bounding box
+    cropped = image[y:y + h, x:x + w]
+    return cropped
+
+    # Crop the image to the bounding box
+    cropped = image[y:y + h, x:x + w]
+    return cropped
+
+
+def process_images(input_folder, output_folder):
+    # # Create the output folder if it doesn't exist
+    # if not os.path.exists(output_folder):
+    #     os.makedirs(output_folder)
+
+    # Iterate through all files in the input folder
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.png'):
+            # Read the image
+            img_path = os.path.join(input_folder, filename)
+            image = cv2.imread(img_path)
+
+            # Check if the image was successfully loaded
+            if image is None:
+                # print(f"Warning: Could not read image {img_path}. Skipping.")
+                continue
+
+            # Crop the black space
+            cropped_image = crop_black_space(image)
+
+            # If the image is completely black, delete it
+            if cropped_image is None:
+                # os.remove(img_path)
+                # print(f"Deleted completely black image {img_path}.")
+                continue
+
+            # Save the cropped image
+            output_path = os.path.join(output_folder, filename)
+            cv2.imwrite(output_path, cropped_image)
+
+    print("Phase 2 'crop images' Done")
+
+
+
+
+
+
 
 
 # Define your data loading and preprocessing functions here
