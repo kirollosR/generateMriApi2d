@@ -4,6 +4,7 @@ import shutil
 
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse
 import nibabel as nib
 import numpy as np
 from pathlib import Path
@@ -61,11 +62,12 @@ def delete_temp_dir(temp_dir):
 def create_generated_dir():
     current_time = datetime.datetime.now()
     timestamp = current_time.strftime("%d-%m-%Y_%H%M%S")
-    path_filename = f"MRIs/generated/generated_{timestamp}"
+    folder_name = f"generated_{timestamp}"
+    path_filename = f"MRIs/generated/{folder_name}"
     generated_dir = os.path.join(os.getcwd(), path_filename)
     if not os.path.exists(generated_dir):
         os.makedirs(generated_dir)
-    return generated_dir, path_filename
+    return generated_dir, folder_name
 
 @router.post("/{from_seq}/{to_seq}")
 async def preprocess_and_predict(from_seq: str, to_seq: str, file: UploadFile = File(...)):
@@ -113,7 +115,7 @@ async def preprocess_and_predict(from_seq: str, to_seq: str, file: UploadFile = 
 
     filename = f"generatedMri_{to_seq}_from_{from_seq}"
 
-    generated_dir, generated_dir_filename = create_generated_dir()
+    generated_dir, generated_folder_name = create_generated_dir()
     generated_nii_path = os.path.join(generated_dir, f"{filename}.nii")
     postprocessing.create_rotated_nifti(add_black_images_path, generated_nii_path)
 
@@ -128,12 +130,30 @@ async def preprocess_and_predict(from_seq: str, to_seq: str, file: UploadFile = 
     return {
         "success": True,
         "message": "File uploaded and generated successfully",
-        "From_Sequence": from_seq,
+        "from_sequence": from_seq,
         "to_sequence": to_seq,
         "input_filename": new_filename,
-        # "output_filename": file_name,
-        # "output_path": f"{generated_nii_path}",
-        "output_nii_path": f"{generated_dir_filename}/{filename}.nii",
-        "output_gif_path": f"{generated_dir_filename}/{filename}.gif",
-        "output_png_path": f"{generated_dir_filename}/{filename}.png",
+        "output_folder_name": generated_folder_name,
     }
+
+@router.get("/png/{folder_name}")
+async def get_generated_png(folder_name):
+    generated_dir = os.path.join(os.getcwd(), f"MRIs/generated/{folder_name}")
+    print(generated_dir)
+    png_files = glob.glob(f"{generated_dir}\*.png")
+    return FileResponse(png_files[0])
+
+@router.get("/nii/{folder_name}")
+async def get_generated_png(folder_name):
+    generated_dir = os.path.join(os.getcwd(), f"MRIs/generated/{folder_name}")
+    print(generated_dir)
+    nii_files = glob.glob(f"{generated_dir}\*.nii")
+    nii_filename = os.path.basename(nii_files[0])
+    return FileResponse(nii_files[0], filename=nii_filename)
+
+@router.get("/test")
+async def test():
+    # Replace 'path_to_your_file.nii' with the actual path to your .nii file
+    file_path = "MRIs/generated/generated_03-06-2024_193514/generatedMri_t2_from_t1.png"
+    # Return the file as a response, allowing it to be downloaded
+    return FileResponse(file_path, media_type="image/png")

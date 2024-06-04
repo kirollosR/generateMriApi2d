@@ -66,10 +66,16 @@ app = FastAPI()
 @router.get("/download-nii")
 async def download_nii():
     # Replace 'path_to_your_file.nii' with the actual path to your .nii file
+    file_path = "MRIs/generated/generated_02-06-2024_235045/generatedMri_t2_from_t1.png"
+    # Return the file as a response, allowing it to be downloaded
+    return FileResponse(file_path, media_type="image/png")
+
+@router.get("/download-png")
+async def download_png():
+    # Replace 'path_to_your_file.nii' with the actual path to your .nii file
     file_path = "MRIs/BraTS-GLI-00001-001-t1c.nii"
     # Return the file as a response, allowing it to be downloaded
-    return FileResponse(file_path, filename="BraTS-GLI-00001-001-t1c.nii")
-
+    return FileResponse(file_path)
 
 from pathlib import Path
 
